@@ -57,7 +57,7 @@ class MCPClient:
         messages = [
             {
                 "role": "user",
-                "content": query
+                "content": "I have some tools available. Please help me choose some right tools (Can select multiple tools) to support me in answering the following question: " + query
             }
         ]
 
@@ -81,6 +81,11 @@ class MCPClient:
         message = response.choices[0].message
         if message.content:
             final_responses.append(message.content)
+
+        # Handle case where no tool is called
+        if not message.tool_calls and message.content:
+            final_responses.append(message.content)
+            return "\n".join(final_responses)
         
         if message.tool_calls:
             for tool_call in message.tool_calls:
@@ -112,7 +117,7 @@ class MCPClient:
                     model=self.model,
                     messages=messages+ [{
                         "role": "user",
-                        "content": "Please provide a natural language response."
+                        "content": "From the result and the query. Please summarize the result and give me the final answer with naturally language."
                     }],
                     max_tokens=1000
                 )
@@ -121,6 +126,17 @@ class MCPClient:
 
                 if message.content:
                     final_responses.append(message.content)
+
+        # If no tool was used and no content was returned, make a direct model call
+        if not final_responses:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=1000
+            )
+            message = response.choices[0].message
+            if message.content:
+                final_responses.append(message.content)
 
         return "\n".join(final_responses)
 
