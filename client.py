@@ -86,11 +86,11 @@ class MCPClient:
             for tool_call in message.tool_calls:
                 tool_name = tool_call.function.name
                 tool_args = json.loads(tool_call.function.arguments)
-                tool_id = tool_call.id
 
                 print(f"Tool call: {tool_name} with args: {tool_args}")
                 # Execute tool call
                 result = await self.session.call_tool(tool_name, tool_args)
+                # final_responses.append(f"[Calling tool {tool_name} with args {tool_args}]")
 
                 messages.append({
                     "role": "tool",
@@ -101,24 +101,24 @@ class MCPClient:
 
                 print(f"Tool result: {result.content[0].text}")
                 
-                # Format the tool result as plain text instead of structured content
-                tool_result_text = f"Tool '{tool_name}' returned: {result.content[0].text}"
+                tool_result_text = result.content[0].text
                 messages.append({
-                    "role": "user",
-                    "content": tool_result_text
+                    "role": "assistant",
+                    "content": f"I retrieved the information you requested. {tool_result_text}"
                 })
-
-                final_responses.append(tool_result_text)
 
                 # Get next response from LLM
                 response = await self.client.chat.completions.create(
                     model=self.model,
-                    messages=messages,
-                    tools=available_tools,
+                    messages=messages+ [{
+                        "role": "user",
+                        "content": "Please provide a natural language response."
+                    }],
                     max_tokens=1000
                 )
-                
+
                 message = response.choices[0].message
+
                 if message.content:
                     final_responses.append(message.content)
 

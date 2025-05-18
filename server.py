@@ -21,7 +21,17 @@ def get_temperature(location: str) -> float:
     """
     Get the current temperature from the location.
     """
-    return 25.0 
+
+    print(f"Getting temperature for {location}")
+    
+    if location == "Hanoi":
+        return 30.0
+    elif location == "HCM":
+        return 32.0
+    elif location == "Can Tho":
+        return 28.0
+    else:
+        return 25.0
 
 if __name__ == "__main__":
     mcp.run(transport='sse')
