@@ -8,18 +8,18 @@ from mcp.types import Tool as MCPTool
 from openai.types.chat import ChatCompletionToolParam as OpenAITool
 from openai.types import FunctionDefinition as OpenAIFunctionDefinition
 
+
 class MCPClient:
     def __init__(self):
         self.session = None
         self.exit_stack = AsyncExitStack()
         self.client = AsyncOpenAI(
             base_url="http://127.0.0.1:1234/v1",
-            api_key="not-needed"  # Local LLMs typically don't need an API key
+            api_key="not-needed"
         )
         self.model = "gemma-3-4b-it"
 
     async def connect_to_server(self, server_url: str):
-        """Connect to an SSE MCP server."""
         print(f"Connecting to SSE MCP server at {server_url}")
 
         self._streams_context = sse_client(url=server_url)
@@ -28,17 +28,13 @@ class MCPClient:
         self._session_context = ClientSession(*streams)
         self.session = await self._session_context.__aenter__()
 
-        # Initialize
         await self.session.initialize()
-        
-        # List available tools
+
         response = await self.session.list_tools()
         tools = response.tools
         print(f"Connected to SSE MCP Server at {server_url}. Available tools: {[tool.name for tool in tools]}")
+
     def parse_tool_for_openai(self, tool: MCPTool) -> OpenAITool:
-        """
-        Converts a Tool object into OpenAI API-compatible tool format.
-        """
         return OpenAITool(
             type="function",
             function=OpenAIFunctionDefinition(
@@ -52,96 +48,98 @@ class MCPClient:
             )
         )
 
+    def format_tool_result(self, tool_name: str, tool_args: dict, raw_result: str) -> str:
+        args_string = ", ".join(f"{k}={v}" for k, v in tool_args.items())
+        return f"Tool '{tool_name}' was called with arguments ({args_string}) and returned: {raw_result}"
+
     async def process_query(self, query: str) -> str:
-        """Process a query using local LLM and available tools"""
         messages = [
             {
                 "role": "user",
-                "content": "I have some tools available. Please help me choose some right tools (Can select multiple tools) to support me in answering the following question: " + query
+                "content": (
+                    "You can use one or more tools step by step to solve this problem. "
+                    "If you already get a tool result, do not call the same tool again with the same arguments. "
+                    "Please give me the final answer when enough information is available. "
+                    "Now answer this: " + query
+                )
             }
         ]
 
         response = await self.session.list_tools()
         available_tools = [self.parse_tool_for_openai(tool) for tool in response.tools]
 
-
-        # Initial LLM API call
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=available_tools,
-            max_tokens=1000,
-            tool_choice="auto"
-        )
-
-
-        # Process response and handle tool calls
         final_responses = []
-        
-        message = response.choices[0].message
-        if message.content:
-            final_responses.append(message.content)
+        called_tools = set()
 
-        # Handle case where no tool is called
-        if not message.tool_calls and message.content:
-            final_responses.append(message.content)
-            return "\n".join(final_responses)
-        
-        if message.tool_calls:
+        while True:
+            # Gọi model
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=available_tools,
+                max_tokens=1000,
+                tool_choice="auto"
+            )
+
+            message = response.choices[0].message
+
+            # Nếu có nội dung văn bản trả lời thì lưu lại
+            if message.content:
+                final_responses.append(message.content)
+
+            # Nếu không có tool call nào nữa thì thoát vòng lặp
+            if not message.tool_calls:
+                break
+
+            # Có tool call → xử lý từng cái
             for tool_call in message.tool_calls:
                 tool_name = tool_call.function.name
                 tool_args = json.loads(tool_call.function.arguments)
 
-                print(f"Tool call: {tool_name} with args: {tool_args}")
-                # Execute tool call
-                result = await self.session.call_tool(tool_name, tool_args)
-                # final_responses.append(f"[Calling tool {tool_name} with args {tool_args}]")
+                # Tránh lặp lại cùng một tool với cùng args
+                tool_call_key = (tool_name, json.dumps(tool_args, sort_keys=True))
+                if tool_call_key in called_tools:
+                    print(f"Skipping duplicate tool call: {tool_call_key}")
+                    continue
+                called_tools.add(tool_call_key)
 
+                print(f"Calling tool: {tool_name} with args: {tool_args}")
+                result = await self.session.call_tool(tool_name, tool_args)
+                raw_result = result.content[0].text
+                tool_result_text = self.format_tool_result(tool_name, tool_args, raw_result)
+                print(f"Tool result: {tool_result_text}")
+
+                # Gửi tool result về lại model
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": result.content[0].text
+                    "content": tool_result_text
                 })
-
-
-                print(f"Tool result: {result.content[0].text}")
                 
-                tool_result_text = result.content[0].text
-                messages.append({
-                    "role": "assistant",
-                    "content": f"I retrieved the information you requested. {tool_result_text}"
-                })
+        messages.append({
+            "role": "user",
+            "content": "Now, based on the previous question and the tool results above, please give me the final answer in natural language."
+        })
 
-                # Get next response from LLM
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages+ [{
-                        "role": "user",
-                        "content": "From the result and the query. Please summarize the result and give me the final answer with naturally language."
-                    }],
-                    max_tokens=1000
-                )
-
-                message = response.choices[0].message
-
-                if message.content:
-                    final_responses.append(message.content)
-
-        # If no tool was used and no content was returned, make a direct model call
-        if not final_responses:
+        try:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 max_tokens=1000
             )
-            message = response.choices[0].message
-            if message.content:
-                final_responses.append(message.content)
+            final_message = response.choices[0].message
+            if final_message.content:
+                final_responses.append(final_message.content)
+        except Exception as e:
+            print("Error while summarizing:", e)
+
+        # ✅ Fallback nếu tất cả đều fail
+        if not final_responses:
+            return "Sorry, I could not find an answer to your question."
 
         return "\n".join(final_responses)
 
     async def chat_loop(self):
-        """Run an interactive chat loop"""
         print("\nMCP Client Started!")
         print("Type your queries or 'quit' to exit.")
 
@@ -159,9 +157,9 @@ class MCPClient:
                 print(f"\nError: {str(e)}")
 
     async def cleanup(self):
-        """Clean up resources"""
         await self.client.close()
         await self.exit_stack.aclose()
+
 
 async def main():
     client = MCPClient()
